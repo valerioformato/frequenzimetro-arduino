@@ -1,11 +1,23 @@
 #![no_std]
 #![no_main]
 #![feature(abi_avr_interrupt)]
+#![feature(const_option)]
+
+mod timerclock;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use panic_halt as _;
+use timerclock::{Resolution, TClock};
+use fixed::{types::extra::U3, FixedU16};
+use ufmt_float::uFmt_f32;
 
 static PIN_CHANGED: AtomicBool = AtomicBool::new(false);
+
+fn average(numbers: &[u32]) -> FixedU16<U3> {
+    let sum_it = numbers.iter().filter(|f| **f > 0);
+    let count_it = numbers.iter().filter(|f| **f > 0);
+    FixedU16::<U3>::from_num( sum_it.sum::<u32>() as u32 ) / count_it.count() as u16
+}
 
 //This function is called on change of pin 2
 #[avr_device::interrupt(atmega328p)]
@@ -44,20 +56,49 @@ fn main() -> ! {
     //From this point on an interrupt can happen
     unsafe { avr_device::interrupt::enable() };
 
+    let clock = TClock::new(dp.TC0, Resolution::_1_MS).unwrap();
+    let mut last_timer_value = 0;
+
+    const MAX_TIME_MEASUREMENTS: usize = 100;
+    let mut index = 0;
+    let mut time_measurements: [u32; MAX_TIME_MEASUREMENTS] = [0; MAX_TIME_MEASUREMENTS];
+    let mut array_full = false;
+
     loop {
         if rotate(&PIN_CHANGED) {
-            let new_state = match clock_pin.is_high() {
+            let new_timer_value = clock.micros();
+            match clock_pin.is_high() {
                 true => {
                     led.set_high();
-                    'H'
                 }
                 false => {
                     led.set_low();
-                    'L'
                 }
             };
+            let delta_t = new_timer_value - last_timer_value;
+            time_measurements[index] = delta_t as u32;
+            index = (index + 1) % MAX_TIME_MEASUREMENTS;
+            ufmt::uwriteln!(
+                &mut serial,
+                "[{}] Pin state changed after {} us",
+                index,
+                delta_t
+            )
+            .unwrap();
 
-            ufmt::uwriteln!(&mut serial, "D2 Status changed to {}", new_state).unwrap();
+            if index == 0 && !array_full {
+                array_full = true;
+            }
+
+            last_timer_value = new_timer_value;
+        }
+
+        // every 10 ms
+        if clock.millis() % 1000 == 0 && index > 0 {
+            let mean_interval: FixedU16::<U3> = average(&time_measurements);
+            let v = uFmt_f32::Three(mean_interval.to_num::<f32>());
+
+            ufmt::uwriteln!(&mut serial, "{} us", v).unwrap();
         }
     }
 }
