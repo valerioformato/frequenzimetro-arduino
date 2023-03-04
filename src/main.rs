@@ -8,15 +8,15 @@ mod timerclock;
 use core::sync::atomic::{AtomicBool, Ordering};
 use panic_halt as _;
 use timerclock::{Resolution, TClock};
-use fixed::{types::extra::U3, FixedU16};
+use fixed::{types::extra::U3, FixedU32};
 use ufmt_float::uFmt_f32;
 
 static PIN_CHANGED: AtomicBool = AtomicBool::new(false);
 
-fn average(numbers: &[u32]) -> FixedU16<U3> {
+fn average(numbers: &[u32]) -> FixedU32<U3> {
     let sum_it = numbers.iter().filter(|f| **f > 0);
     let count_it = numbers.iter().filter(|f| **f > 0);
-    FixedU16::<U3>::from_num( sum_it.sum::<u32>() as u32 ) / count_it.count() as u16
+    FixedU32::<U3>::from_num( sum_it.sum::<u32>() as u32 ) / count_it.count() as u32
 }
 
 //This function is called on change of pin 2
@@ -73,29 +73,24 @@ fn main() -> ! {
                 }
                 false => {
                     led.set_low();
-                }
+                }   
             };
             let delta_t = new_timer_value - last_timer_value;
             time_measurements[index] = delta_t as u32;
             index = (index + 1) % MAX_TIME_MEASUREMENTS;
-            ufmt::uwriteln!(
-                &mut serial,
-                "[{}] Pin state changed after {} us",
-                index,
-                delta_t
-            )
-            .unwrap();
 
             if index == 0 && !array_full {
                 array_full = true;
             }
 
             last_timer_value = new_timer_value;
+
+            //ufmt::uwriteln!(&mut serial, "Pin status changed after {} us", delta_t).unwrap();
         }
 
         // every 10 ms
         if clock.millis() % 1000 == 0 && index > 0 {
-            let mean_interval: FixedU16::<U3> = average(&time_measurements);
+            let mean_interval: FixedU32::<U3> = average(&time_measurements);
             let v = uFmt_f32::Three(mean_interval.to_num::<f32>());
 
             ufmt::uwriteln!(&mut serial, "{} us", v).unwrap();
