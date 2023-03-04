@@ -323,6 +323,7 @@ impl<ClockFreq: Clock> TimerClock<ClockFreq> {
 	}
 }
 
+
 // The timer interrupt service routine
 #[avr_device::interrupt(atmega328p)]
 fn TIMER0_COMPA() {
@@ -335,6 +336,9 @@ fn TIMER0_COMPA() {
 	})
 }
 
+// TODO: try to implement the Default trait for timers so we can default-initialize one
+//   extra difficulty: it should be called as const fn so we can make it static...
+impl<ClockFreq: Clock> Default for TimerClock<ClockFreq>{}
 
 #[cfg(test)]
 mod test {

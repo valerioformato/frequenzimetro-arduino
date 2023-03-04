@@ -5,35 +5,60 @@
 
 mod timerclock;
 
-use core::sync::atomic::{AtomicBool, Ordering};
-use panic_halt as _;
-use timerclock::{Resolution, TClock};
 use fixed::{types::extra::U3, FixedU32};
+use panic_halt as _;
+use portable_atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
+use timerclock::{Resolution, TClock};
 use ufmt_float::uFmt_f32;
 
 static PIN_CHANGED: AtomicBool = AtomicBool::new(false);
+static INDEX: AtomicUsize = AtomicUsize::new(0);
+const MAX_TIME_MEASUREMENTS: usize = 100;
+const ZERO_U32: AtomicU32 = AtomicU32::new(0);
+static TIME_MEASUREMENTS: [AtomicU32; MAX_TIME_MEASUREMENTS] = [ZERO_U32; MAX_TIME_MEASUREMENTS];
+static mut CLOCK: TClock = ;
 
 fn average(numbers: &[u32]) -> FixedU32<U3> {
     let sum_it = numbers.iter().filter(|f| **f > 0);
     let count_it = numbers.iter().filter(|f| **f > 0);
-    FixedU32::<U3>::from_num( sum_it.sum::<u32>() as u32 ) / count_it.count() as u32
+    FixedU32::<U3>::from_num(sum_it.sum::<u32>()) / count_it.count() as u32
 }
 
 //This function is called on change of pin 2
 #[avr_device::interrupt(atmega328p)]
 #[allow(non_snake_case)]
 fn PCINT2() {
-    PIN_CHANGED.store(true, Ordering::SeqCst);
+    static mut last_timer_value: u32 = 0;
+
+    // get the new timer tick count
+    let mut new_timer_value: u32 = 0;
+    unsafe {
+        let clock = CLOCK.get_mut();
+        new_timer_value = (*clock).as_ref().unwrap().micros();
+    }
+
+    // count how many ticks have passed
+    let delta_t = new_timer_value - *last_timer_value;
+
+    // update the measurements array
+    let index = INDEX
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| {
+            Some((x + 1) % MAX_TIME_MEASUREMENTS)
+        })
+        .unwrap();
+    TIME_MEASUREMENTS[index].store(delta_t as u32, Ordering::SeqCst);
+
+    // store the last timer tick count
+    *last_timer_value = new_timer_value;
 }
 
-fn rotate(flag: &AtomicBool) -> bool {
+fn read_times(values: &[AtomicU32; MAX_TIME_MEASUREMENTS]) -> [u32; MAX_TIME_MEASUREMENTS] {
+    let mut result: [u32; MAX_TIME_MEASUREMENTS] = [0; MAX_TIME_MEASUREMENTS];
     avr_device::interrupt::free(|_cs| {
-        if flag.load(Ordering::SeqCst) {
-            flag.store(false, Ordering::SeqCst);
-            true
-        } else {
-            false
+        for i in 0..MAX_TIME_MEASUREMENTS {
+            result[i] = values[i].load(Ordering::SeqCst);
         }
+        result
     })
 }
 
@@ -53,47 +78,30 @@ fn main() -> ! {
     // Enable pin change interrupts on PCINT18 which is pin PD2 (= d2)
     dp.EXINT.pcmsk2.write(|w| w.bits(0b100));
 
+    // Initialize global clock timer
+    unsafe {
+        CLOCK = AtomicPtr::<TClock>::new(&mut TClock::new(dp.TC0, Resolution::_1_MS).unwrap());
+    }
     //From this point on an interrupt can happen
     unsafe { avr_device::interrupt::enable() };
 
-    let clock = TClock::new(dp.TC0, Resolution::_1_MS).unwrap();
-    let mut last_timer_value = 0;
-
-    const MAX_TIME_MEASUREMENTS: usize = 100;
-    let mut index = 0;
-    let mut time_measurements: [u32; MAX_TIME_MEASUREMENTS] = [0; MAX_TIME_MEASUREMENTS];
-    let mut array_full = false;
+    let micros_in_sec: FixedU32<U3> = FixedU32::<U3>::from_num(1_000_000);
 
     loop {
-        if rotate(&PIN_CHANGED) {
-            let new_timer_value = clock.micros();
-            match clock_pin.is_high() {
-                true => {
-                    led.set_high();
-                }
-                false => {
-                    led.set_low();
-                }   
-            };
-            let delta_t = new_timer_value - last_timer_value;
-            time_measurements[index] = delta_t as u32;
-            index = (index + 1) % MAX_TIME_MEASUREMENTS;
-
-            if index == 0 && !array_full {
-                array_full = true;
-            }
-
-            last_timer_value = new_timer_value;
-
-            //ufmt::uwriteln!(&mut serial, "Pin status changed after {} us", delta_t).unwrap();
+        let mut time: u32 = 0;
+        unsafe {
+            let clock = CLOCK.get_mut();
+            time = (*clock).as_ref().unwrap().millis();
         }
+    
+        if time % 100 == 0 && INDEX.load(Ordering::SeqCst) > 0 {
+            let time_measurements = read_times(&TIME_MEASUREMENTS);
+            let mean_interval: FixedU32<U3> = average(&time_measurements);
+            let freq = micros_in_sec / mean_interval / 2;
+            let v = uFmt_f32::Three(freq.to_num::<f32>());
+            let t = uFmt_f32::Three(mean_interval.to_num::<f32>());
 
-        // every 10 ms
-        if clock.millis() % 1000 == 0 && index > 0 {
-            let mean_interval: FixedU32::<U3> = average(&time_measurements);
-            let v = uFmt_f32::Three(mean_interval.to_num::<f32>());
-
-            ufmt::uwriteln!(&mut serial, "{} us", v).unwrap();
+            ufmt::uwriteln!(&mut serial, "freq: {} Hz, interval: {} us", v, t).unwrap();
         }
     }
 }
