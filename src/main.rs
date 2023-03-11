@@ -2,12 +2,17 @@
 #![no_main]
 #![feature(abi_avr_interrupt)]
 #![feature(const_option)]
+#![feature(ptr_const_cast)]
 
 mod timerclock;
 
+use core::{
+    ptr::null,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use fixed::{types::extra::U3, FixedU32};
 use panic_halt as _;
-use portable_atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
+use portable_atomic::{AtomicU32, AtomicUsize, AtomicPtr};
 use timerclock::{Resolution, TClock};
 use ufmt_float::uFmt_f32;
 
@@ -16,7 +21,7 @@ static INDEX: AtomicUsize = AtomicUsize::new(0);
 const MAX_TIME_MEASUREMENTS: usize = 100;
 const ZERO_U32: AtomicU32 = AtomicU32::new(0);
 static TIME_MEASUREMENTS: [AtomicU32; MAX_TIME_MEASUREMENTS] = [ZERO_U32; MAX_TIME_MEASUREMENTS];
-static mut CLOCK: TClock = ;
+static CLOCK_PTR: AtomicPtr<TClock> = AtomicPtr::new(null::<TClock>().as_mut());
 
 fn average(numbers: &[u32]) -> FixedU32<U3> {
     let sum_it = numbers.iter().filter(|f| **f > 0);
@@ -33,8 +38,8 @@ fn PCINT2() {
     // get the new timer tick count
     let mut new_timer_value: u32 = 0;
     unsafe {
-        let clock = CLOCK.get_mut();
-        new_timer_value = (*clock).as_ref().unwrap().micros();
+        let clock = CLOCK_PTR.load(Ordering::SeqCst);
+        new_timer_value = (*clock).micros();
     }
 
     // count how many ticks have passed
@@ -79,20 +84,19 @@ fn main() -> ! {
     dp.EXINT.pcmsk2.write(|w| w.bits(0b100));
 
     // Initialize global clock timer
-    unsafe {
-        CLOCK = AtomicPtr::<TClock>::new(&mut TClock::new(dp.TC0, Resolution::_1_MS).unwrap());
-    }
-    //From this point on an interrupt can happen
+    // IMPORTANT!!!
+    // We set the global pointer to the clock **before** enabling interrupts because we wanna make sure
+    // that when PCINT2 fires it can "safely" dereference CLOCK_PTR
+    // FIXME: Check if it's ok to create a clock before enabling interrupts
+    let mut clock = TClock::new(dp.TC0, Resolution::_1_MS).unwrap();
+    CLOCK_PTR.store(&mut clock, Ordering::SeqCst);
+        //From this point on an interrupt can happen
     unsafe { avr_device::interrupt::enable() };
 
     let micros_in_sec: FixedU32<U3> = FixedU32::<U3>::from_num(1_000_000);
 
     loop {
-        let mut time: u32 = 0;
-        unsafe {
-            let clock = CLOCK.get_mut();
-            time = (*clock).as_ref().unwrap().millis();
-        }
+        let mut time: u32 = clock.millis();
     
         if time % 100 == 0 && INDEX.load(Ordering::SeqCst) > 0 {
             let time_measurements = read_times(&TIME_MEASUREMENTS);
