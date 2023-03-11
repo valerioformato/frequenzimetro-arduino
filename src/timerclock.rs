@@ -40,6 +40,9 @@ cfg_if::cfg_if! {
             pub fn micros(&self) -> u32 {
                 self.0.elapsed().as_micros() as u32
             }
+            pub fn counter_micros(&self) -> u32 {
+                0
+            }
         }
 
         pub type TClock = StdClock;
@@ -313,8 +316,13 @@ impl<ClockFreq: Clock> TimerClock<ClockFreq> {
 
         millis * 1000 + counter_micros
     }
-}
 
+    /// Returns the number of microseconds since this clock was started
+    pub fn counter_micros(&self) -> u32 {
+        let t = avr_device::interrupt::free(|cs| self.tc0.tcnt0.read().bits());
+        u32::from(t) * self.um_p_cnt
+    }
+}
 
 // The timer interrupt service routine
 #[avr_device::interrupt(atmega328p)]
