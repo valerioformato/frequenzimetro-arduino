@@ -3,6 +3,7 @@
 #![feature(abi_avr_interrupt)]
 #![feature(unwrap_infallible)]
 
+use embedded_hal::blocking::serial::write;
 use panic_halt as _;
 
 mod display;
@@ -14,6 +15,41 @@ use ufmt_float::uFmt_f32;
 
 use display::I2cDisplay;
 use tcounter::TCounter;
+
+use arduino_hal::prelude::{_embedded_hal_blocking_i2c_Read, _embedded_hal_blocking_i2c_Write};
+pub fn read_busy_and_AC(i2c: &mut arduino_hal::I2c) -> Result<(bool, u8), arduino_hal::i2c::Error> {
+    // read BF and AC command
+    let write_buffer: [u8; 2] = [0xE, 0xE];
+    i2c.write(0x27, &write_buffer)?;
+
+    let mut read_buffer: [u8; 4] = [0; 2];
+    i2c.read(0x27, &mut read_buffer)?;
+
+    let ac = (read_buffer[0] & 0x70) << 4 | read_buffer[1] & 0xF0;
+    return Ok(((read_buffer[0] & 0b10000000) != 0, ac));
+}
+
+fn write_cmd_imp(
+    i2c: &mut arduino_hal::I2c,
+    rs: bool,
+    rw: bool,
+    data: u8,
+) -> Result<(), arduino_hal::i2c::Error> {
+    let buffer: [u8; 2] = [
+        // 4 msb of data, no enable, p3 always set
+        (data & 0xF0) | ((rs as u8) | ((rw as u8) << 1) | 0xC),
+        // 4 lsb of data, enable on, p3 always set
+        ((data & 0xF) << 4) | ((rs as u8) | (rw as u8 >> 1) | 0xC),
+    ];
+
+    i2c.write(0x27, &buffer)?;
+
+    while match read_busy_and_AC(i2c)? {
+        (busy, ac) => busy,
+    } {}
+
+    Ok(())
+}
 
 fn correct_frequency_counts(counts: u32) -> u32 {
     counts - counts * 4 / 100
@@ -35,9 +71,23 @@ fn main() -> ! {
 
     let mut _led = pins.d13.into_output();
 
-    let counter = TCounter::new(dp.TC1, true);
-    let mut display = I2cDisplay::new(&mut i2c, 0x27u8, &mut serial);
-    display.init().unwrap();
+    // let counter = TCounter::new(dp.TC1, true);
+    // let mut display = I2cDisplay::new(&mut i2c, 0x27u8);
+    // ufmt::uwriteln!(&mut serial, "Display created").unwrap();
+    // display.init();
+    // ufmt::uwriteln!(&mut serial, "Display initialized").unwrap();
+
+    write_cmd_imp(&mut i2c, false, false, 0b00000001);
+    ufmt::uwriteln!(&mut serial, "Display clear").unwrap();
+    arduino_hal::delay_ms(2000);
+
+    write_cmd_imp(&mut i2c, false, false, 0b00101000);
+    ufmt::uwriteln!(&mut serial, "Function set").unwrap();
+    arduino_hal::delay_ms(2000);
+
+    write_cmd_imp(&mut i2c, false, false, 0b00000010);
+    ufmt::uwriteln!(&mut serial, "Return home").unwrap();
+    arduino_hal::delay_ms(2000);
 
     //From this point on an interrupt can happen
     unsafe { avr_device::interrupt::enable() };
@@ -47,11 +97,13 @@ fn main() -> ! {
 
     let mut last_clock_cycles_meas: u32 = 0;
 
-    loop {
-        display.clear_display().unwrap();
+    let mut buffer: [u8; 256] = [0u8; 256];
 
-        let (busy, ac) = display.read_busy_and_AC().unwrap();
-        ufmt::uwriteln!(&mut serial, "{} {}", busy, ac).unwrap();
+    loop {
+        arduino_hal::delay_ms(100);
+
+        // let (busy, ac) = read_busy_and_AC(&mut i2c).unwrap();
+        // ufmt::uwriteln!(&mut serial, "{} {}", busy, ac).unwrap();
 
         // let clock_cycles_meas = correct_frequency_counts(counter.clock_cycles());
         // let delta_clock_cycles: FixedU64<U8> =
