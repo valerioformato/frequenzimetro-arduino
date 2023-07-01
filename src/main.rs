@@ -19,14 +19,21 @@ use tcounter::TCounter;
 use arduino_hal::prelude::{_embedded_hal_blocking_i2c_Read, _embedded_hal_blocking_i2c_Write};
 pub fn read_busy_and_AC(i2c: &mut arduino_hal::I2c) -> Result<(bool, u8), arduino_hal::i2c::Error> {
     // read BF and AC command
-    let write_buffer: [u8; 2] = [0xE, 0xE];
-    i2c.write(0x27, &write_buffer)?;
-
-    let mut read_buffer: [u8; 4] = [0; 2];
+    let write_buffer: [u8; 3] = [0xA, 0xE, 0xA];
+    for value in write_buffer {
+        i2c.write(0x27, &[value])?;
+    }
+    let mut read_buffer: [u8; 2] = [0; 2];
     i2c.read(0x27, &mut read_buffer)?;
 
-    let ac = (read_buffer[0] & 0x70) << 4 | read_buffer[1] & 0xF0;
+    let ac = (read_buffer[0] & 0x70) | (read_buffer[1] & 0xF0) >> 4;
     return Ok(((read_buffer[0] & 0b10000000) != 0, ac));
+}
+
+fn expand_cmd_sequence(data: u8) -> [u8; 3] {
+    const ENABLE_PIN: u8 = 0x4;
+
+    [data, data | ENABLE_PIN, data]
 }
 
 fn write_cmd_imp(
@@ -35,18 +42,26 @@ fn write_cmd_imp(
     rw: bool,
     data: u8,
 ) -> Result<(), arduino_hal::i2c::Error> {
-    let buffer: [u8; 2] = [
-        // 4 msb of data, no enable, p3 always set
-        (data & 0xF0) | ((rs as u8) | ((rw as u8) << 1) | 0xC),
-        // 4 lsb of data, enable on, p3 always set
-        ((data & 0xF) << 4) | ((rs as u8) | (rw as u8 >> 1) | 0xC),
-    ];
+    let upper_half_cmd =
+        expand_cmd_sequence((data & 0xF0) | ((rs as u8) | ((rw as u8) << 1) | 0x8));
+    let lower_half_cmd =
+        expand_cmd_sequence(((data & 0xF) << 4) | ((rs as u8) | ((rw as u8) << 1) | 0x8));
 
-    i2c.write(0x27, &buffer)?;
+    let buffer: [u8; 6] = {
+        let mut whole: [u8; 6] = [0; 6];
+        let (one, two) = whole.split_at_mut(upper_half_cmd.len());
+        one.copy_from_slice(&upper_half_cmd);
+        two.copy_from_slice(&lower_half_cmd);
+        whole
+    };
 
-    while match read_busy_and_AC(i2c)? {
-        (busy, ac) => busy,
-    } {}
+    for value in buffer {
+        i2c.write(0x27, &[value])?;
+        // arduino_hal::delay_us(200);
+        while match read_busy_and_AC(i2c)? {
+            (busy, acalue) => busy,
+        } {}
+    }
 
     Ok(())
 }
@@ -77,17 +92,27 @@ fn main() -> ! {
     // display.init();
     // ufmt::uwriteln!(&mut serial, "Display initialized").unwrap();
 
-    write_cmd_imp(&mut i2c, false, false, 0b00000001);
+    write_cmd_imp(&mut i2c, false, false, 0b00101000).expect("Err Function set");
+    ufmt::uwriteln!(&mut serial, "Function set1").unwrap();
+    write_cmd_imp(&mut i2c, false, false, 0b00101000).expect("Err Function set");
+    ufmt::uwriteln!(&mut serial, "Function set2").unwrap();
+    arduino_hal::delay_ms(2000);
+
+    let (bf, ac) = read_busy_and_AC(&mut i2c).expect("Err reading BF and AC");
+    ufmt::uwriteln!(&mut serial, "Read BF = {} AC = {}", bf, ac).unwrap();
+    arduino_hal::delay_ms(2000);
+
+    write_cmd_imp(&mut i2c, false, false, 0b00000001).expect("Err display clear");
     ufmt::uwriteln!(&mut serial, "Display clear").unwrap();
     arduino_hal::delay_ms(2000);
 
-    write_cmd_imp(&mut i2c, false, false, 0b00101000);
-    ufmt::uwriteln!(&mut serial, "Function set").unwrap();
+    write_cmd_imp(&mut i2c, false, false, 0b00001111).expect("Err display ON");
+    ufmt::uwriteln!(&mut serial, "Display ON").unwrap();
     arduino_hal::delay_ms(2000);
 
-    write_cmd_imp(&mut i2c, false, false, 0b00000010);
-    ufmt::uwriteln!(&mut serial, "Return home").unwrap();
-    arduino_hal::delay_ms(2000);
+    // write_cmd_imp(&mut i2c, false, false, 0b00000010).expect("Err return home");
+    // ufmt::uwriteln!(&mut serial, "Return home").unwrap();
+    // arduino_hal::delay_ms(2000);
 
     //From this point on an interrupt can happen
     unsafe { avr_device::interrupt::enable() };
