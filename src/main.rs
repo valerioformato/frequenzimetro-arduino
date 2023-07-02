@@ -41,8 +41,8 @@ fn main() -> ! {
     // let counter = TCounter::new(dp.TC1, true);
     let mut display = I2cDisplay::new(&mut i2c, 0x27u8);
     ufmt::uwriteln!(&mut serial, "Display created").unwrap();
-    // display.init();
-    // ufmt::uwriteln!(&mut serial, "Display initialized").unwrap();
+    display.init().expect("Err initializing display");
+    ufmt::uwriteln!(&mut serial, "Display initialized").unwrap();
 
     //From this point on an interrupt can happen
     unsafe { avr_device::interrupt::enable() };
