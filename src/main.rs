@@ -3,6 +3,8 @@
 #![feature(abi_avr_interrupt)]
 #![feature(unwrap_infallible)]
 
+use core::str::FromStr;
+
 use embedded_hal::blocking::serial::write;
 use panic_halt as _;
 
@@ -17,6 +19,8 @@ use display::I2cDisplay;
 use tcounter::TCounter;
 
 use arduino_hal::prelude::{_embedded_hal_blocking_i2c_Read, _embedded_hal_blocking_i2c_Write};
+
+use heapless::String;
 
 fn correct_frequency_counts(counts: u32) -> u32 {
     counts - counts * 4 / 100
@@ -44,6 +48,10 @@ fn main() -> ! {
     display.init().expect("Err initializing display");
     ufmt::uwriteln!(&mut serial, "Display initialized").unwrap();
 
+    display
+        .test_to_be_removed(String::<80>::from_str("Hello World").unwrap())
+        .unwrap();
+
     //From this point on an interrupt can happen
     unsafe { avr_device::interrupt::enable() };
 
@@ -55,9 +63,9 @@ fn main() -> ! {
     let mut buffer: [u8; 256] = [0u8; 256];
 
     loop {
-        arduino_hal::delay_ms(100);
+        arduino_hal::delay_ms(1000);
 
-        // let (busy, ac) = read_busy_and_AC(&mut i2c).unwrap();
+        // let (busy, ac) = display.read_busy_and_AC().unwrap();
         // ufmt::uwriteln!(&mut serial, "{} {}", busy, ac).unwrap();
 
         // let clock_cycles_meas = correct_frequency_counts(counter.clock_cycles());

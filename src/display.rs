@@ -4,6 +4,7 @@ use core::iter::Repeat;
 use arduino_hal::i2c::Direction;
 use arduino_hal::prelude::{_embedded_hal_blocking_i2c_Read, _embedded_hal_blocking_i2c_Write};
 use arduino_hal::I2c;
+use heapless::String;
 
 enum RW {
     Read,
@@ -59,7 +60,7 @@ impl Default for FunctionSet {
     fn default() -> Self {
         Self {
             eight_bit_mode: false,
-            two_line_mode: false,
+            two_line_mode: true,
             big_fonts: false,
         }
     }
@@ -90,8 +91,8 @@ impl Default for DisplayControls {
     fn default() -> Self {
         Self {
             display_on: true,
-            cursor_on: false,
-            cursor_blink: false,
+            cursor_on: true,
+            cursor_blink: true,
         }
     }
 }
@@ -112,6 +113,112 @@ impl Command for DisplayControls {
     }
 }
 
+struct EntryModeSet {
+    increment_cursor_position: bool,
+    shift_display: bool,
+}
+impl Default for EntryModeSet {
+    fn default() -> Self {
+        Self {
+            increment_cursor_position: true,
+            shift_display: false,
+        }
+    }
+}
+impl Command for EntryModeSet {
+    fn rw() -> RW {
+        RW::Write
+    }
+
+    fn rs() -> RS {
+        RS::Disabled
+    }
+
+    fn payload(self) -> u8 {
+        0b00000100u8 | (self.increment_cursor_position as u8) << 1 | self.shift_display as u8
+    }
+}
+
+enum ShiftDirection {
+    Right,
+    Left,
+}
+struct CursorDisplayShift {
+    display_shift: bool,
+    direction: ShiftDirection,
+}
+impl Default for CursorDisplayShift {
+    fn default() -> Self {
+        Self {
+            display_shift: false,
+            direction: ShiftDirection::Right,
+        }
+    }
+}
+impl Command for CursorDisplayShift {
+    fn rw() -> RW {
+        RW::Write
+    }
+
+    fn rs() -> RS {
+        RS::Disabled
+    }
+
+    fn payload(self) -> u8 {
+        let direction_bit = match self.direction {
+            ShiftDirection::Right => 0x4 as u8,
+            ShiftDirection::Left => 0 as u8,
+        };
+
+        0b00010000u8 | (self.display_shift as u8) << 3 | direction_bit
+    }
+}
+
+struct SetDDRAMAddress {
+    address: u8,
+}
+impl Default for SetDDRAMAddress {
+    fn default() -> Self {
+        Self { address: 0 as u8 }
+    }
+}
+impl Command for SetDDRAMAddress {
+    fn rw() -> RW {
+        RW::Write
+    }
+
+    fn rs() -> RS {
+        RS::Disabled
+    }
+
+    fn payload(self) -> u8 {
+        // NOTE: if address is larger than 7bit-max we truncate it.
+        0b10000000u8 | (self.address & 0x7F)
+    }
+}
+
+struct WriteToDDRAM {
+    data: u8,
+}
+impl Default for WriteToDDRAM {
+    fn default() -> Self {
+        Self { data: 0 as u8 }
+    }
+}
+impl Command for WriteToDDRAM {
+    fn rw() -> RW {
+        RW::Write
+    }
+
+    fn rs() -> RS {
+        RS::Enabled
+    }
+
+    fn payload(self) -> u8 {
+        self.data
+    }
+}
+
 pub struct I2cDisplay<'a> {
     i2c: &'a mut I2c,
     address: u8,
@@ -119,6 +226,7 @@ pub struct I2cDisplay<'a> {
 
 impl<'a> I2cDisplay<'a> {
     const ENABLE_BIT: u8 = 1 << 2;
+    const ON_BIT: u8 = 1 << 3;
 
     pub fn new(i2c: &'a mut I2c, address: u8) -> Self {
         return Self { i2c, address };
@@ -127,12 +235,21 @@ impl<'a> I2cDisplay<'a> {
     pub fn init(&mut self) -> Result<(), arduino_hal::i2c::Error> {
         self.write_cmd_imp(FunctionSet::default())
             .and_then(|_a| self.write_cmd_imp(ClearDisplay {}))
+            .and_then(|_a| self.write_cmd_imp(DisplayControls::default()))
+            .and_then(|_a| self.write_cmd_imp(EntryModeSet::default()))
             .and_then(|_a| self.write_cmd_imp(ReturnHome {}))
+            .and_then(|_a| self.write_cmd_imp(SetDDRAMAddress::default()))
     }
 
-    pub fn read_busy_and_AC(
-        i2c: &'a mut arduino_hal::I2c,
-    ) -> Result<(bool, u8), arduino_hal::i2c::Error> {
+    pub fn test_to_be_removed(&mut self, msg: String<80>) -> Result<(), arduino_hal::i2c::Error> {
+        for char in msg.as_bytes() {
+            self.write_cmd_imp(WriteToDDRAM { data: char.clone() })?;
+        }
+
+        Ok(())
+    }
+
+    pub fn read_busy_and_AC(&mut self) -> Result<(bool, u8), arduino_hal::i2c::Error> {
         let mut read_buffer: [u8; 2] = [0; 2];
         let (one, two) = read_buffer.split_at_mut(1);
 
@@ -141,28 +258,26 @@ impl<'a> I2cDisplay<'a> {
         // read BF and AC command
         let write_buffer: [u8; 3] = [0xA, 0xE, 0xA];
         for value in write_buffer {
-            i2c.write(0x27, &[value])?;
+            self.i2c.write(0x27, &[value])?;
             arduino_hal::delay_us(200);
-
-            if (value & Self::ENABLE_BIT) > 0 {
-                i2c.read(0x27, one)?;
-            }
         }
+        self.i2c.read(0x27, one)?;
 
         for value in write_buffer {
-            i2c.write(0x27, &[value])?;
+            self.i2c.write(0x27, &[value])?;
             arduino_hal::delay_us(200);
-
-            if (value & Self::ENABLE_BIT) > 0 {
-                i2c.read(0x27, two)?;
-            }
         }
+        self.i2c.read(0x27, two)?;
 
         let ac = (read_buffer[0] & 0x70) | (read_buffer[1] & 0xF0) >> 4;
         return Ok(((read_buffer[0] & 0b10000000) != 0, ac));
     }
 
-    fn write_cmd_imp<C: Command + 'static>(
+    fn expand_cmd_sequence(data: u8) -> [u8; 3] {
+        [data, data | Self::ENABLE_BIT, data]
+    }
+
+    pub fn write_cmd_imp<C: Command + 'static>(
         &mut self,
         cmd: C,
     ) -> Result<(), arduino_hal::i2c::Error> {
@@ -180,38 +295,36 @@ impl<'a> I2cDisplay<'a> {
 
         let payload = cmd.payload();
 
-        let d1 = payload & 0xF0;
-        let d2 = payload & 0x0F << 4;
+        let upper_half_cmd = Self::expand_cmd_sequence(
+            (payload & 0xF0) | ((rs_bit as u8) | ((rw_bit as u8) << 1) | Self::ON_BIT),
+        );
+        let lower_half_cmd = Self::expand_cmd_sequence(
+            ((payload & 0xF) << 4) | ((rs_bit as u8) | ((rw_bit as u8) << 1) | Self::ON_BIT),
+        );
 
-        let s1: u8 = rs_bit | rw_bit << 1;
-        let s2: u8 = rs_bit | rw_bit << 1 | Self::ENABLE_BIT;
+        let buffer: [u8; 6] = {
+            let mut whole: [u8; 6] = [0; 6];
+            let (one, two) = whole.split_at_mut(upper_half_cmd.len());
+            one.copy_from_slice(&upper_half_cmd);
+            two.copy_from_slice(&lower_half_cmd);
+            whole
+        };
 
-        // This is the tricky part:
-        // - The first write sets up the 4 data pins to their desired state.
-        // - The second part switches on the `enable` bit on the display so it will read the data pins.
-        // - The third write just resets the `enable` pin on the display to leave it in a known stable state.
-        let mut buffer: [u8; 3] = [d1 | s1, d1 | s2, d1 | s1];
-        for byte in buffer {
-            self.i2c.write(self.address, &[byte])?;
-            arduino_hal::delay_us(200);
-        }
-
-        // NOTE: FunctionSet requires the upper 4 bytes to be sent twice, since the device starts in 8bit mode
-        // This is what the manual says, and even if I'm not quite sure why, this is the way to make it work.
         if repeat_upper {
-            for byte in buffer {
-                self.i2c.write(self.address, &[byte])?;
+            for value in upper_half_cmd {
+                // We disable the ON bit on the first round, so we effectively power cycle the display if it's already on
+                self.i2c.write(0x27, &[value & !Self::ON_BIT])?;
                 arduino_hal::delay_us(200);
             }
         }
-        // TODO: does this also work?
-        // self.i2c.write(self.address, &byte)?;
 
-        buffer = [d2 | s1, d2 | s2, d2 | s1];
-        for byte in buffer {
-            self.i2c.write(self.address, &[byte])?;
+        for value in buffer {
+            self.i2c.write(0x27, &[value])?;
             arduino_hal::delay_us(200);
         }
+        while match self.read_busy_and_AC()? {
+            (busy, _) => busy,
+        } {}
 
         Ok(())
     }
