@@ -1,7 +1,6 @@
 use core::any::TypeId;
-use core::iter::Repeat;
 
-use arduino_hal::i2c::Direction;
+use arduino_hal::i2c::Error;
 use arduino_hal::prelude::{_embedded_hal_blocking_i2c_Read, _embedded_hal_blocking_i2c_Write};
 use arduino_hal::I2c;
 use heapless::String;
@@ -91,8 +90,8 @@ impl Default for DisplayControls {
     fn default() -> Self {
         Self {
             display_on: true,
-            cursor_on: true,
-            cursor_blink: true,
+            cursor_on: false,
+            cursor_blink: false,
         }
     }
 }
@@ -241,7 +240,22 @@ impl<'a> I2cDisplay<'a> {
             .and_then(|_a| self.write_cmd_imp(SetDDRAMAddress::default()))
     }
 
-    pub fn test_to_be_removed(&mut self, msg: String<80>) -> Result<(), arduino_hal::i2c::Error> {
+    pub fn clear(&mut self) -> Result<(), arduino_hal::i2c::Error> {
+        self.write_cmd_imp(ClearDisplay {})
+            .and_then(|_a| self.write_cmd_imp(ReturnHome {}))
+    }
+
+    pub fn move_cursor(&mut self, position: u8) -> Result<(), arduino_hal::i2c::Error> {
+        let address = match position {
+            0..=15 => position,
+            16..=32 => (position - 16) + 0x40,
+            _ => return Ok(()),
+        };
+
+        self.write_cmd_imp(SetDDRAMAddress { address: address })
+    }
+
+    pub fn write_string(&mut self, msg: String<32>) -> Result<(), arduino_hal::i2c::Error> {
         for char in msg.as_bytes() {
             self.write_cmd_imp(WriteToDDRAM { data: char.clone() })?;
         }
@@ -258,16 +272,16 @@ impl<'a> I2cDisplay<'a> {
         // read BF and AC command
         let write_buffer: [u8; 3] = [0xA, 0xE, 0xA];
         for value in write_buffer {
-            self.i2c.write(0x27, &[value])?;
+            self.i2c.write(self.address, &[value])?;
             arduino_hal::delay_us(200);
         }
-        self.i2c.read(0x27, one)?;
+        self.i2c.read(self.address, one)?;
 
         for value in write_buffer {
-            self.i2c.write(0x27, &[value])?;
+            self.i2c.write(self.address, &[value])?;
             arduino_hal::delay_us(200);
         }
-        self.i2c.read(0x27, two)?;
+        self.i2c.read(self.address, two)?;
 
         let ac = (read_buffer[0] & 0x70) | (read_buffer[1] & 0xF0) >> 4;
         return Ok(((read_buffer[0] & 0b10000000) != 0, ac));
@@ -277,7 +291,7 @@ impl<'a> I2cDisplay<'a> {
         [data, data | Self::ENABLE_BIT, data]
     }
 
-    pub fn write_cmd_imp<C: Command + 'static>(
+    fn write_cmd_imp<C: Command + 'static>(
         &mut self,
         cmd: C,
     ) -> Result<(), arduino_hal::i2c::Error> {
@@ -313,13 +327,13 @@ impl<'a> I2cDisplay<'a> {
         if repeat_upper {
             for value in upper_half_cmd {
                 // We disable the ON bit on the first round, so we effectively power cycle the display if it's already on
-                self.i2c.write(0x27, &[value & !Self::ON_BIT])?;
+                self.i2c.write(self.address, &[value & !Self::ON_BIT])?;
                 arduino_hal::delay_us(200);
             }
         }
 
         for value in buffer {
-            self.i2c.write(0x27, &[value])?;
+            self.i2c.write(self.address, &[value])?;
             arduino_hal::delay_us(200);
         }
         while match self.read_busy_and_AC()? {
