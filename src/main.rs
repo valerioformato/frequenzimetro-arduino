@@ -8,6 +8,7 @@ use core::str::FromStr;
 use panic_halt as _;
 
 mod display;
+mod format_utils;
 mod tcounter;
 
 use fixed::{types::extra::U8, FixedU64};
@@ -35,28 +36,6 @@ fn get_frequency(
     }
 
     (counts / interval_micros, UNITS[idx])
-}
-
-fn format_freq(freq: FixedU64<U8>) -> String<7> {
-    const DIGITS: [char; 10] = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
-    let powers_of_ten: [FixedU64<U8>; 3] = [
-        FixedU64::<U8>::from(1_u32),
-        FixedU64::<U8>::from(10_u32),
-        FixedU64::<U8>::from(100_u32),
-    ];
-
-    let mut result = String::<7>::new();
-
-    for idx in 2..=0 {
-        let digit_idx = (freq / powers_of_ten[idx]).floor().to_num();
-        match digit_idx {
-            0..=9 => Some(DIGITS[digit_idx]),
-            _ => None,
-        }
-        .and_then(|c| Some(result.push(c).unwrap()));
-    }
-
-    result
 }
 
 #[arduino_hal::entry]
@@ -119,6 +98,16 @@ fn main() -> ! {
 
         // move cursor to second line
         display.move_cursor(16).unwrap();
+        let f_str = format_utils::format_freq(freq);
+        let mut second_line = String::<32>::new();
+        second_line
+            .push_str("Frequency: ")
+            .and_then(|_| second_line.push_str(f_str.as_str()))
+            .expect("Failed to format line");
+
+        display
+            .write_string(second_line)
+            .expect("Failed to write to display");
 
         last_clock_cycles_meas = clock_cycles_meas;
 
