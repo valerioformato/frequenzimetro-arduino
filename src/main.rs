@@ -47,33 +47,46 @@ fn main() -> ! {
         dp.TWI,
         pins.a4.into_pull_up_input(),
         pins.a5.into_pull_up_input(),
-        50000,
+        500000,
     );
 
     let mut serial = arduino_hal::default_serial!(dp, pins, 57600);
 
+    // Signal clock counter section
     let counter = TCounter::new(dp.TC1, true);
+
+    // Display section
     let mut display = I2cDisplay::new(&mut i2c, 0x27u8);
+
     ufmt::uwriteln!(&mut serial, "Display created").unwrap();
-    display.init().expect("Err initializing display");
+    display
+        .init()
+        .or_else(|_| {
+            ufmt::uwriteln!(&mut serial, "Err initializing display");
+            Ok::<(), ()>(())
+        })
+        .unwrap();
     ufmt::uwriteln!(&mut serial, "Display initialized").unwrap();
 
     display
-        .write_string(String::<32>::from_str("Initialized").unwrap())
+        .write_line(String::<16>::from_str("Initialized").unwrap())
         .unwrap();
 
     arduino_hal::delay_ms(500);
 
     display.clear();
     display
-        .write_string(String::<32>::from_str("Frequency:").unwrap())
+        .write_line(String::<16>::from_str("Frequency:").unwrap())
         .unwrap();
 
     //From this point on an interrupt can happen
     unsafe { avr_device::interrupt::enable() };
 
+    const DISPLAY_WRITE_TIME_MILLIS: u32 = 42;
     let delay_in_ms: u16 = 200;
-    let micros_elapsed: FixedU64<U8> = FixedU64::<U8>::from(1000 * delay_in_ms as u32);
+    let mut micros_elapsed: FixedU64<U8> =
+        FixedU64::<U8>::from(1000 * (delay_in_ms as u32 + DISPLAY_WRITE_TIME_MILLIS));
+    // let micros_elapsed: FixedU64<U8> = FixedU64::<U8>::from(1000 * (delay_in_ms as u32));
 
     let mut last_clock_cycles_meas: u32 = 0;
 
@@ -87,26 +100,46 @@ fn main() -> ! {
         let d_disp = uFmt_f32::Three(delta_clock_cycles.to_num::<f32>());
         let f_disp = uFmt_f32::Three(freq.to_num::<f32>());
 
-        ufmt::uwriteln!(
-            &mut serial,
-            "measured {} clock cycles, freq = {} {}",
-            d_disp,
-            f_disp,
-            f_unit,
-        )
-        .unwrap();
+        // just this adds ~10 ms to the whole loop
+        // ufmt::uwriteln!(
+        //     &mut serial,
+        //     "measured {} clock cycles, freq = {} {}",
+        //     d_disp,
+        //     f_disp,
+        //     f_unit,
+        // )
+        // .unwrap();
+
+        // This takes approximately ~52 ms on a 328p
 
         // move cursor to second line
-        display.move_cursor(16).unwrap();
-        let f_str = format_utils::format_freq(freq);
-        let mut second_line = String::<32>::new();
+        display.move_cursor(16).expect("Move cursor failed"); // ~8 ms
+        let f_str = format_utils::format_freq(freq); // ~2 ms
+        let mut second_line = String::<16>::new();
+
         second_line
-            .push_str("Frequency: ")
+            .push_str(" ")
             .and_then(|_| second_line.push_str(f_str.as_str()))
-            .expect("Failed to format line");
+            .and_then(|_| second_line.push(' '))
+            .and_then(|_| second_line.push_str(f_unit))
+            .or_else(|_| {
+                ufmt::uwriteln!(&mut serial, "Failed to format line");
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+
+        while second_line.len() < second_line.capacity() {
+            second_line
+                .push(' ')
+                .or_else(|_| {
+                    ufmt::uwriteln!(&mut serial, "Failed to fill second line");
+                    Ok::<(), ()>(())
+                })
+                .unwrap();
+        }
 
         display
-            .write_string(second_line)
+            .write_line(second_line)
             .expect("Failed to write to display");
 
         last_clock_cycles_meas = clock_cycles_meas;

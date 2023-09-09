@@ -1,8 +1,8 @@
 // Works for ATMega328p
 
-use core::cell::Cell;
 use arduino_hal::pac::TC1;
 use avr_device::interrupt::Mutex;
+use core::cell::Cell;
 
 static OVERFLOW_COUNTER: Mutex<Cell<u32>> = Mutex::new(Cell::new(0));
 

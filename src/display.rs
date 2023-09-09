@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use core::any::TypeId;
 
 use arduino_hal::i2c::Error;
@@ -255,7 +257,16 @@ impl<'a> I2cDisplay<'a> {
         self.write_cmd_imp(SetDDRAMAddress { address: address })
     }
 
+    // TODO: split on two lines
     pub fn write_string(&mut self, msg: String<32>) -> Result<(), arduino_hal::i2c::Error> {
+        for char in msg.as_bytes() {
+            self.write_cmd_imp(WriteToDDRAM { data: char.clone() })?;
+        }
+
+        Ok(())
+    }
+
+    pub fn write_line(&mut self, msg: String<16>) -> Result<(), arduino_hal::i2c::Error> {
         for char in msg.as_bytes() {
             self.write_cmd_imp(WriteToDDRAM { data: char.clone() })?;
         }
